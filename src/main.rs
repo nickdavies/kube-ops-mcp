@@ -4,6 +4,9 @@
 //! - `dry_run_apply` needs create/patch on every kind (RBAC has no dry-run
 //!   verb), and a dry-run response would echo back Secret data the caller can't
 //!   otherwise read. This server holds those verbs and refuses Secrets.
+//! - `dry_run_kustomization` does the same after Flux's postBuild variable
+//!   substitution, which reads Secrets the caller can't; Secret-sourced
+//!   values are redacted from the output (see [`substitute`]).
 //! - `secret_keys` lists a Secret's key names without the values; RBAC can
 //!   only grant `get`, which returns the values.
 //!
@@ -12,7 +15,9 @@
 
 mod auth;
 mod dry_run;
+mod kustomization;
 mod server;
+mod substitute;
 
 use std::sync::Arc;
 

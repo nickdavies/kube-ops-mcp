@@ -11,7 +11,7 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::dry_run;
+use crate::{dry_run, kustomization, substitute::Redactor};
 
 #[derive(Clone)]
 pub struct KubeOps {
@@ -38,6 +38,19 @@ pub struct DryRunApplyRequest {
     /// Field manager to apply as. Defaults to `kustomize-controller` so
     /// fields Flux owns can be dropped, exactly as a real reconcile would.
     field_manager: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct DryRunKustomizationRequest {
+    /// Name of the live Flux Kustomization whose `spec.postBuild` supplies
+    /// the variables.
+    kustomization: String,
+    /// The Kustomization's namespace. Defaults to `flux-system`.
+    namespace: Option<String>,
+    /// Output of `flux build kustomization <name> -n flux-system --path
+    /// <dir> --kustomization-file <ks.yaml> --dry-run`, with `${VAR}` still
+    /// literal.
+    manifests: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -74,6 +87,56 @@ impl KubeOps {
                 .field_manager
                 .unwrap_or_else(|| "kustomize-controller".into()),
             default_namespace: request.namespace,
+            redactor: Redactor::default(),
+        };
+        Ok(dry_run::run(&self.client, objects, &options).await)
+    }
+
+    #[tool(
+        description = "Dry-run a Flux Kustomization's build exactly as kustomize-controller \
+        would apply it: substitutes the live Kustomization's postBuild variables (its \
+        substitute and substituteFrom ConfigMaps and Secrets, strict mode), then runs \
+        dry_run_apply's server-side dry-run as kustomize-controller. Prefer this over \
+        dry_run_apply for anything Flux applies, since fields using ${VAR} then diff \
+        against real values.\n\n\
+        Values that came from a Secret are shown as <redacted:NAME>, in diffs and errors \
+        alike. Only ${VAR} and ${VAR:-default} (also = and :=) are expanded; Flux's other \
+        operators (${#VAR}, ${VAR:0:1}, ${VAR^^}, ${VAR/a/b}, ...) are refused, because \
+        they could read a Secret back past the redaction."
+    )]
+    async fn dry_run_kustomization(
+        &self,
+        Parameters(request): Parameters<DryRunKustomizationRequest>,
+    ) -> Result<String, String> {
+        let namespace = request.namespace.unwrap_or_else(|| "flux-system".into());
+        let ks = kustomization::load(&self.client, &namespace, &request.kustomization).await?;
+        let redactor = Redactor::new(
+            ks.secret_vars
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_str())),
+        );
+
+        let mut objects = Vec::new();
+        for document in kustomization::split_documents(&request.manifests) {
+            let expanded = kustomization::substitute_document(&document, &ks.vars)
+                .and_then(|text| dry_run::parse_manifests(&text))
+                // Parse errors can quote the substituted text.
+                .map_err(|e| redactor.text(&e))?;
+            objects.extend(expanded);
+        }
+        if objects.is_empty() {
+            return Err("no objects in manifests".into());
+        }
+        tracing::info!(
+            %namespace,
+            kustomization = %request.kustomization,
+            objects = objects.len(),
+            "dry_run_kustomization"
+        );
+        let options = dry_run::Options {
+            field_manager: "kustomize-controller".into(),
+            default_namespace: ks.target_namespace,
+            redactor,
         };
         Ok(dry_run::run(&self.client, objects, &options).await)
     }
