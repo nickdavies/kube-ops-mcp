@@ -9,6 +9,8 @@ use kube::{
 };
 use serde_json::Value;
 
+use crate::substitute::Redactor;
+
 /// Parses a multi-document YAML stream, skipping empty documents.
 pub fn parse_manifests(yaml: &str) -> Result<Vec<DynamicObject>, String> {
     let mut objects = Vec::new();
@@ -40,20 +42,30 @@ pub fn is_secret(gvk: &GroupVersionKind) -> bool {
 }
 
 /// Renders an object for diffing, without the fields that change on every
-/// write and say nothing about the manifest.
-fn render(object: &DynamicObject) -> String {
+/// write and say nothing about the manifest, and with secret values
+/// redacted.
+fn render(object: &DynamicObject, redactor: &Redactor) -> String {
     let mut object = object.clone();
     object.metadata.managed_fields = None;
     object.metadata.resource_version = None;
     object.metadata.generation = None;
-    serde_yaml_ng::to_string(&object).unwrap_or_else(|e| format!("<unrenderable: {e}>"))
+    let mut value = match serde_json::to_value(&object) {
+        Ok(value) => value,
+        Err(e) => return format!("<unrenderable: {e}>"),
+    };
+    redactor.value(&mut value);
+    serde_yaml_ng::to_string(&value).unwrap_or_else(|e| format!("<unrenderable: {e}>"))
 }
 
 /// The diff from `live` (absent when the object would be created) to the
 /// dry-run result, or `None` when they match.
-pub fn diff(live: Option<&DynamicObject>, applied: &DynamicObject) -> Option<String> {
-    let before = live.map(render).unwrap_or_default();
-    let after = render(applied);
+pub fn diff(
+    live: Option<&DynamicObject>,
+    applied: &DynamicObject,
+    redactor: &Redactor,
+) -> Option<String> {
+    let before = live.map(|l| render(l, redactor)).unwrap_or_default();
+    let after = render(applied, redactor);
     if before == after {
         return None;
     }
@@ -71,6 +83,8 @@ pub struct Options {
     /// Namespace for namespaced objects that don't set one, like a Flux
     /// Kustomization's `targetNamespace`.
     pub default_namespace: Option<String>,
+    /// Applied to rendered objects and to the whole report.
+    pub redactor: Redactor,
 }
 
 /// Dry-runs every object and returns one report section per object. A
@@ -95,7 +109,9 @@ pub async fn run(client: &Client, objects: Vec<DynamicObject>, options: &Options
         };
         report.push_str(&format!("## {label}\n{outcome}\n\n"));
     }
-    report
+    // Names in labels and values echoed in API errors aren't rendered
+    // objects, so redact the text as well.
+    options.redactor.text(&report)
 }
 
 type Labelled<T> = Result<T, (String, String)>;
@@ -154,7 +170,10 @@ async fn apply_one(
         .await
         .map_err(fail)?;
 
-    let outcome = match (live.is_some(), diff(live.as_ref(), &applied)) {
+    let outcome = match (
+        live.is_some(),
+        diff(live.as_ref(), &applied, &options.redactor),
+    ) {
         (false, Some(d)) => format!("created\n```diff\n{d}```"),
         (true, Some(d)) => format!("configured\n```diff\n{d}```"),
         (_, None) => "unchanged".to_string(),
@@ -201,10 +220,30 @@ mod tests {
         .remove(0);
         let mut applied = live.clone();
         applied.metadata.resource_version = Some("2".into());
-        assert_eq!(diff(Some(&live), &applied), None);
+        let none = Redactor::default();
+        assert_eq!(diff(Some(&live), &applied, &none), None);
 
         applied.data["data"]["k"] = "changed".into();
-        let d = diff(Some(&live), &applied).unwrap();
+        let d = diff(Some(&live), &applied, &none).unwrap();
         assert!(d.contains("-  k: v") && d.contains("+  k: changed"), "{d}");
+    }
+
+    #[test]
+    fn diff_redacts_both_sides() {
+        let live = parse_manifests(
+            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: a\ndata:\n  host: a.example.com\n",
+        )
+        .unwrap()
+        .remove(0);
+        let mut applied = live.clone();
+        let redactor = Redactor::new([("DOMAIN", "example.com")]);
+        assert_eq!(diff(Some(&live), &applied, &redactor), None);
+
+        applied.data["data"]["host"] = "b.example.com".into();
+        let d = diff(None, &applied, &redactor).unwrap();
+        assert!(
+            d.contains("b.<redacted:DOMAIN>") && !d.contains("example"),
+            "{d}"
+        );
     }
 }
