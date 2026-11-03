@@ -30,8 +30,9 @@ impl KubeOps {
 
 #[derive(Deserialize, JsonSchema)]
 pub struct DryRunApplyRequest {
-    /// Multi-document YAML, e.g. the output of `flux build kustomization` or
-    /// `kustomize build`.
+    /// Multi-document YAML. For a Flux Kustomization, use the output of
+    /// `flux build kustomization <name> -n flux-system --path <dir>
+    /// --kustomization-file <ks.yaml> --dry-run`.
     manifests: String,
     /// Namespace for namespaced objects that don't set one.
     namespace: Option<String>,
@@ -58,7 +59,14 @@ impl KubeOps {
         description = "Server-side apply dry-run of Kubernetes manifests against the live \
         cluster, with force-conflicts, as Flux's field manager. Reports per object whether \
         it would be created, configured or unchanged, with a diff from the live object, or \
-        the API server's error. Nothing is persisted. Secrets are refused."
+        the API server's error. Nothing is persisted. Secrets are refused.\n\n\
+        For a Flux Kustomization, pass the output of `flux build kustomization <name> \
+        -n flux-system --path <dir> --kustomization-file <ks.yaml> --dry-run`. Plain \
+        `kustomize build` output lacks the labels Flux adds, so every object would show \
+        them removed. Without `--dry-run`, `flux build` reads the substitution Secrets \
+        and fails for callers that can't. `--dry-run` skips Flux's ${VAR} substitution, \
+        so any field that uses a variable shows as changed to the literal `${VAR}`: treat \
+        those lines as noise, not as real changes."
     )]
     async fn dry_run_apply(
         &self,
