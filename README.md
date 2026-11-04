@@ -6,7 +6,19 @@ grant safely.
 | Tool | Why it needs a server |
 |---|---|
 | `dry_run_apply` | RBAC has no dry-run verb, so a dry-run needs real create/patch on every kind. The response is the merged object, which would echo back Secret data the caller can't read. The server holds the verbs and refuses Secrets. |
+| `dry_run_kustomization` | `dry_run_apply` after Flux's `${VAR}` substitution, which reads Secrets the caller can't. Secret-sourced values are redacted from the output, and substitution operators that could read a value back past the redaction are refused. |
 | `secret_keys` | Lists a Secret's key names. RBAC can only grant `get`, which returns the values. |
+
+To build input for `dry_run_kustomization`, run from the repo root with the
+Kustomization's `spec.postBuild` removed. `flux build --dry-run` still applies
+an inline `postBuild.substitute`, and then blanks every other `${VAR}`:
+
+```
+kubectl get kustomization <name> -n flux-system -o json \
+  | jq 'del(.spec.postBuild)' > /tmp/ks.json
+flux build kustomization <name> -n flux-system \
+  --path <spec.path> --kustomization-file /tmp/ks.json --dry-run
+```
 
 Operations that RBAC plus a ValidatingAdmissionPolicy *can* express
 (`flux reconcile`, ExternalSecret force-sync) stay out of this server; grant

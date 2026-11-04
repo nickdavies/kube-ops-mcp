@@ -30,9 +30,8 @@ impl KubeOps {
 
 #[derive(Deserialize, JsonSchema)]
 pub struct DryRunApplyRequest {
-    /// Multi-document YAML. For a Flux Kustomization, use the output of
-    /// `flux build kustomization <name> -n flux-system --path <dir>
-    /// --kustomization-file <ks.yaml> --dry-run`.
+    /// Multi-document YAML. For something a Flux Kustomization applies, use
+    /// dry_run_kustomization instead.
     manifests: String,
     /// Namespace for namespaced objects that don't set one.
     namespace: Option<String>,
@@ -48,9 +47,18 @@ pub struct DryRunKustomizationRequest {
     kustomization: String,
     /// The Kustomization's namespace. Defaults to `flux-system`.
     namespace: Option<String>,
-    /// Output of `flux build kustomization <name> -n flux-system --path
-    /// <dir> --kustomization-file <ks.yaml> --dry-run`, with `${VAR}` still
-    /// literal.
+    /// The Kustomization's build with every `${VAR}` still literal. Build it
+    /// from the repo root with the Kustomization's `spec.postBuild` removed:
+    ///
+    /// ```text
+    /// kubectl get kustomization <name> -n flux-system -o json \
+    ///   | jq 'del(.spec.postBuild)' > /tmp/ks.json
+    /// flux build kustomization <name> -n flux-system \
+    ///   --path <spec.path> --kustomization-file /tmp/ks.json --dry-run
+    /// ```
+    ///
+    /// When the change is to the Kustomization itself, use its ks.yaml from
+    /// the repo, again without `spec.postBuild`.
     manifests: String,
 }
 
@@ -73,13 +81,9 @@ impl KubeOps {
         cluster, with force-conflicts, as Flux's field manager. Reports per object whether \
         it would be created, configured or unchanged, with a diff from the live object, or \
         the API server's error. Nothing is persisted. Secrets are refused.\n\n\
-        For a Flux Kustomization, pass the output of `flux build kustomization <name> \
-        -n flux-system --path <dir> --kustomization-file <ks.yaml> --dry-run`. Plain \
-        `kustomize build` output lacks the labels Flux adds, so every object would show \
-        them removed. Without `--dry-run`, `flux build` reads the substitution Secrets \
-        and fails for callers that can't. `--dry-run` skips Flux's ${VAR} substitution, \
-        so any field that uses a variable shows as changed to the literal `${VAR}`: treat \
-        those lines as noise, not as real changes."
+        For anything a Flux Kustomization applies, use dry_run_kustomization instead: it \
+        applies Flux's ${VAR} substitution, which this tool doesn't, so here any field \
+        using a variable diffs as changed to the literal `${VAR}`."
     )]
     async fn dry_run_apply(
         &self,
@@ -107,6 +111,16 @@ impl KubeOps {
         dry_run_apply's server-side dry-run as kustomize-controller. Prefer this over \
         dry_run_apply for anything Flux applies, since fields using ${VAR} then diff \
         against real values.\n\n\
+        Build the manifests from the repo root, from the Kustomization with \
+        spec.postBuild removed:\n\
+        kubectl get kustomization <name> -n flux-system -o json | jq 'del(.spec.postBuild)' \
+        > /tmp/ks.json\n\
+        flux build kustomization <name> -n flux-system --path <spec.path> \
+        --kustomization-file /tmp/ks.json --dry-run\n\
+        Removing postBuild matters: `flux build --dry-run` still applies an inline \
+        postBuild.substitute, and then blanks every other ${VAR} to an empty string, so \
+        the diff would show hostnames like `app.internal.`. Plain `kustomize build` lacks \
+        the labels Flux adds, so every object would show them removed.\n\n\
         Values that came from a Secret are shown as <redacted:NAME>, in diffs and errors \
         alike. Only ${VAR} and ${VAR:-default} (also = and :=) are expanded; Flux's other \
         operators (${#VAR}, ${VAR:0:1}, ${VAR^^}, ${VAR/a/b}, ...) are refused, because \
