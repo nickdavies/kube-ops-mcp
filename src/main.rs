@@ -29,6 +29,11 @@ use rmcp::transport::streamable_http_server::{
 use tokio::signal::unix::SignalKind;
 use tokio_util::sync::CancellationToken;
 
+/// Largest MCP request accepted. A whole Kustomization build arrives in one
+/// tool call, and builds full of CRDs are big: homelab's
+/// prometheus-operator-crds is 4.6 MB, over rmcp's 4 MiB default.
+const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
+
 /// Runtime configuration, read from the environment.
 struct Config {
     /// Socket to listen on, e.g. `0.0.0.0:8080`.
@@ -87,6 +92,7 @@ async fn main() -> Result<()> {
             .with_legacy_session_mode(false)
             .with_json_response(true)
             .with_allowed_hosts(config.allowed_hosts)
+            .with_max_request_body_bytes(MAX_REQUEST_BODY_BYTES)
             .with_cancellation_token(ct.child_token()),
     );
 
